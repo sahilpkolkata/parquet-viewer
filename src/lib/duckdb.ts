@@ -4,30 +4,48 @@ import duckdb_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js
 
 let db: duckdb.AsyncDuckDB | null = null;
 let conn: duckdb.AsyncDuckDBConnection | null = null;
+let initPromise: Promise<duckdb.AsyncDuckDB> | null = null;
 
 export async function initializeDuckDB() {
+  if (initPromise) return initPromise;
   if (db) return db;
 
-  const DUCKDB_CONFIG: duckdb.DuckDBBundles = {
-    mvp: {
-      mainModule: duckdb_wasm,
-      mainWorker: duckdb_worker,
-    },
-  };
+  initPromise = (async () => {
+    try {
+      const DUCKDB_CONFIG: duckdb.DuckDBBundles = {
+        mvp: {
+          mainModule: duckdb_wasm,
+          mainWorker: duckdb_worker,
+        },
+      };
 
-  const worker = new Worker(DUCKDB_CONFIG.mvp.mainWorker);
-  const logger = new duckdb.ConsoleLogger();
-  const bundle = await duckdb.selectBundle(DUCKDB_CONFIG);
+      // Create a new worker with the correct URL
+      const workerUrl = new URL(DUCKDB_CONFIG.mvp.mainWorker, import.meta.url).href;
+      const worker = new Worker(workerUrl, { type: 'module' });
 
-  db = new duckdb.AsyncDuckDB(logger, worker);
-  await db.instantiate(bundle.mainModule);
-  conn = await db.connect();
+      const logger = new duckdb.ConsoleLogger();
+      const bundle = await duckdb.selectBundle(DUCKDB_CONFIG);
 
-  return db;
+      db = new duckdb.AsyncDuckDB(logger, worker);
+      await db.instantiate(bundle.mainModule, bundle.mainWorker);
+      conn = await db.connect();
+
+      return db;
+    } catch (error) {
+      console.error('Failed to initialize DuckDB:', error);
+      initPromise = null;
+      throw error;
+    }
+  })();
+
+  return initPromise;
 }
 
 export async function executeQuery(query: string) {
-  if (!conn) throw new Error('Database not initialized');
+  if (!conn) {
+    await initializeDuckDB();
+    if (!conn) throw new Error('Failed to initialize database connection');
+  }
   
   try {
     const result = await conn.query(query);
@@ -39,7 +57,10 @@ export async function executeQuery(query: string) {
 }
 
 export async function registerParquetFile(file: File) {
-  if (!db || !conn) throw new Error('Database not initialized');
+  if (!db || !conn) {
+    await initializeDuckDB();
+    if (!db || !conn) throw new Error('Failed to initialize database');
+  }
 
   const buffer = await file.arrayBuffer();
   const fileName = file.name.replace(/\.[^/.]+$/, '');
